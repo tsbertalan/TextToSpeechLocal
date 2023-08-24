@@ -1,0 +1,12 @@
+deep_phonemizer
+matplotlib
+soundfile
+sounddevice
+scipy
+librosa
+unidecode
+inflect
+
+# tut4 (huggingface):
+git+https://github.com/huggingface/transformers.git
+sentencepiece
