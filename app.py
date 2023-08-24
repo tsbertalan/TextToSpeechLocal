@@ -2,7 +2,7 @@
 # Let's adapt the above tut1 to make a little tk app that says things you put in a text box, after you click a "speak" button.
 
 import tkinter as tk
-import torch, torchaudio
+import torch, torchaudio, numpy as np
 import sounddevice as sd, time
 
 
@@ -13,7 +13,7 @@ def get_wave_duration(array, sample_rate):
     return array.shape[0] / sample_rate
 
 
-def play_wave(array, sample_rate=22050*1.2, extra_delay=0, do_sleep=False):
+def play_wave(array, sample_rate=22050, extra_delay=0, do_sleep=False):
     """Play a sound wave."""
     if not isinstance(sample_rate, int):
         sample_rate = int(sample_rate)
@@ -34,37 +34,84 @@ class SpeakerModels:
         device = "cuda" if torch.cuda.is_available() else "cpu"
         self.device = device
 
-        bundle = torchaudio.pipelines.TACOTRON2_WAVERNN_PHONE_LJSPEECH
+        bundle = torchaudio.pipelines.TACOTRON2_WAVERNN_CHAR_LJSPEECH
         message_callback(f"loaded tacotron2 on {device}.")
 
-        processor = bundle.get_text_processor()
-        tacotron2 = bundle.get_tacotron2().to(device)
+        self.processor = bundle.get_text_processor()
+        self.tacotron2 = bundle.get_tacotron2().to(device)
 
-        # Workaround to load model mapped on GPU
-        # https://stackoverflow.com/a/61840832
-        message_callback(f"loaded text processor.")
-        waveglow = torch.hub.load(
-            "NVIDIA/DeepLearningExamples:torchhub",
-            "nvidia_waveglow",
-            model_math="fp32",
-            pretrained=False,
-        )
-        checkpoint = torch.hub.load_state_dict_from_url(
-            "https://api.ngc.nvidia.com/v2/models/nvidia/waveglowpyt_fp32/versions/1/files/nvidia_waveglowpyt_fp32_20190306.pth",  # noqa: E501
-            progress=True,
-            map_location=device,
-        )
-        state_dict = {key.replace("module.", ""): value for key, value in checkpoint["state_dict"].items()}
+        use_waveglow = False
 
-        waveglow.load_state_dict(state_dict)
-        waveglow = waveglow.remove_weightnorm(waveglow)
-        waveglow = waveglow.to(device)
-        waveglow.eval()
+        if not use_waveglow:
+            unchunked_vocoder = bundle.get_vocoder().to(device)
+            def chunked_vocode(spec, lengths):
+                # WaveRNN is very slow, so we'll break the spectrogram into chunks.
+                # spec is shape (batch, n_mel_channels, time)
+                batch_size, n_mel_channels, time = spec.shape
+                assert batch_size == 1
+                assert spec.shape[2] == lengths[0]
+                chunk_size = 32
+                n_chunks = np.math.ceil(spec.shape[2] / chunk_size)
+                chunks = []
+                final_chunk = None
+                for i in range(n_chunks):
+                    chunk = spec[:, :, i*chunk_size:(i+1)*chunk_size]
+                    if chunk.shape[2] < chunk_size:
+                        # Z = torch.zeros(1, 80, chunk_size - chunk.shape[2], device=chunk.device, dtype=chunk.dtype)
+                        # chunk = torch.cat([chunk, Z], dim=2)
+                        final_chunk = chunk
+                    else:
+                        chunks.append(chunk)
+                chunks = torch.cat(chunks, dim=0)
+                # message_callback(f"Created {n_chunks} chunks of shape {chunks.shape}.")
+                waveforms, _ = unchunked_vocoder(chunks)
+                if final_chunk is not None:
+                    final_waveform, _ = unchunked_vocoder(final_chunk.reshape(1, n_mel_channels, -1))
+                    # message_callback(f"Created {n_chunks} waveforms of shape {waveforms.shape}, plus a final waveform of shape {final_waveform.shape}.")
+                    # Rearrange the chunks back into a single waveform.
+                    waveforms = [waveforms[i] for i in range(len(waveforms))] + [final_waveform.reshape(-1)]
+                    waveform = torch.concat(waveforms, dim=0)
+                else:
+                    # message_callback(f"Created {n_chunks} waveforms of shape {waveforms.shape}.")
+                    waveform = torch.concat([waveforms[i] for i in range(len(waveforms))], dim=0)
 
-        self.processor = processor
-        self.tacotron2 = tacotron2
-        self.waveglow = waveglow
-        message_callback(f"loaded waveglow on {device}.")
+                # Add back on the expected batch dimension.
+                waveform = waveform.reshape(batch_size, -1)
+
+                message_callback(f"Created a rearranged waveform of shape {waveform.shape}.")
+                return waveform
+
+            self.vocode = chunked_vocode
+        else:
+            # Workaround to load model mapped on GPU
+            # https://stackoverflow.com/a/61840832
+            message_callback(f"loaded text processor.")
+            waveglow = torch.hub.load(
+                "NVIDIA/DeepLearningExamples:torchhub",
+                "nvidia_waveglow",
+                model_math="fp32",
+                pretrained=False,
+            )
+            checkpoint = torch.hub.load_state_dict_from_url(
+                "https://api.ngc.nvidia.com/v2/models/nvidia/waveglowpyt_fp32/versions/1/files/nvidia_waveglowpyt_fp32_20190306.pth",  # noqa: E501
+                progress=True,
+                map_location=device,
+            )
+            state_dict = {key.replace("module.", ""): value for key, value in checkpoint["state_dict"].items()}
+
+            waveglow.load_state_dict(state_dict)
+            waveglow = waveglow.remove_weightnorm(waveglow)
+            waveglow = waveglow.to(device)
+            waveglow.eval()
+            self.waveglow = waveglow
+            message_callback(f"loaded waveglow on {device}.")
+
+            def vocode(spec, unused_lengths):
+                waveform = self.waveglow.infer(spec)
+                return waveform
+            self.vocode = vocode
+
+
 
     def get_wave(self, text, message_callback=lambda s: None):
         """Given a string, return a sound wave."""
@@ -77,8 +124,11 @@ class SpeakerModels:
                 lengths = lengths.to(self.device)
                 spec, spec_lengths, _ = self.tacotron2.infer(processed, lengths)
                 message_callback(f"created spectrogram.")
-                waveform = self.waveglow.infer(spec)[0].cpu().detach().numpy()
+                
+                waveforms = self.vocode(spec, spec_lengths)
+                waveform = waveforms[0].cpu().detach().numpy()
                 message_callback(f"created waveform of shape {waveform.shape}")
+
         return waveform
 
     def play_wave(self, array, sample_rate=22050*1.2, extra_delay=0):
@@ -197,7 +247,7 @@ def audio_speaking_worker(audio_queue, message_queue):
             n_samp = wave.size
             message_callback(f"{n_samp} samples to speak ...", tag='speaking', notime=True)
             play_wave(wave)  # blocking
-            message_callback(f"{n_samp} samples spoken.", tag='speaking', notime=True)
+            message_callback(f"{n_samp} samples spoken.", tag='speaking')
         else:
             time.sleep(0.05)
 
