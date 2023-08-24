@@ -40,7 +40,7 @@ class SpeakerModels:
         self.processor = bundle.get_text_processor()
         self.tacotron2 = bundle.get_tacotron2().to(device)
 
-        vocoder_method = 'waveglow'
+        vocoder_method = 'melgan'
 
 
         if vocoder_method == 'wavernn':
@@ -48,6 +48,18 @@ class SpeakerModels:
             def unchunked_vocode(specs, lengths):
                 return unchunked_vocoder(specs)[0]
             self.vocode = unchunked_vocode
+
+        elif vocoder_method == 'melgan':
+            melgan = torch.hub.load('seungwonpark/melgan', 'melgan')
+            melgan.eval()
+            melgan = melgan.to(device)
+            message_callback(f"loaded Mel-GAN on {device}.")
+
+            def vocode(spec, unused_lengths):
+                with torch.no_grad():
+                    waveform = melgan.inference(spec)
+                return waveform.reshape(spec.shape[0], -1)
+            self.vocode = vocode
 
         else:
             assert vocoder_method == 'waveglow'
@@ -75,8 +87,7 @@ class SpeakerModels:
             message_callback(f"loaded waveglow on {device}.")
 
             def vocode(spec, unused_lengths):
-                waveform = self.waveglow.infer(spec)
-                return waveform
+                return self.waveglow.infer(spec)
             self.vocode = vocode
 
     def get_wave(self, text, message_callback=lambda s: None):
@@ -90,10 +101,13 @@ class SpeakerModels:
                 lengths = lengths.to(self.device)
                 
                 # message_callback(f"moved to {self.device} ...")
+                # message_callback(f"Lengths: {lengths}")
+                # print("lengths:", lengths)
                 spec, spec_lengths, _ = self.tacotron2.infer(tokens, lengths)
                 message_callback(f"Created spectrogram of shape {intshape(spec)}")
 
                 waveforms = self.vocode(spec, spec_lengths)
+                message_callback(f"Vocoder output has shape {intshape(waveforms)}")
                 waveform = waveforms[0].cpu().detach().numpy()
                 message_callback(f"created waveform of shape {intshape(waveform)}")
 
@@ -119,6 +133,9 @@ def breakup(long_text):
     i2 = i1 + 1
     enders = " \n\t\"'”’"
     not_enders = ["Mr", ]
+    long_text = long_text.strip()
+    if len(long_text) == 0:
+        return []
     while i2 < len(long_text):
         if long_text[i2] in ".?!":
             if i2 == len(long_text) - 1 or long_text[i2+1] in enders:
