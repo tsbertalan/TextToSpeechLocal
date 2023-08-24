@@ -12,15 +12,16 @@ Two worker threads handle the work--one to make the waves, and the other to spea
 
 The first worker thread preprocesses this text to tokens, tacotron2s it to a spectrogram, waveglows it to a big 1D array, and pushes that to a second queue.
 
-The second worker thread pops the 1D array off the queue, and plays it with out loud (blocking that thread appropriately).
+The second worker thread pops the 1D array off the queue, and plays it out loud (blocking that thread appropriately).
 
 There's a nice little GUI that lets you type in text and add it to the queue, with some information that's probably ultimately useless to the user--length of the two queues, and messages returned from the two workers in a autoscrolling log box.
 
 Some problems I could eventually fix:
 
-- [ ] The actual voice is pretty rough. Get a better model.
+- [ ] The actual voice is pretty rough. Get a better model. WaveRNN is much nicer, but too slow without smarter chunking.
 - [ ] Sometimes the player thread runs out of of things to say because the model thread is too slow to generate them. Not sure what can be done about this.
 - [ ] Add play/pause buttons.
+- [ ] Worse, sometimes the sentence is too long for the TacoTron, and it starts outputing gibberish. Do smaller chunks.
 - [ ] Indicate how much of the text is converted to audio with some kind of "buffering" playhead indicator.
 - [ ] Don't just discard converted audio--let the user go back to previous chunks with the playhead.
 - [ ] Use a prettier UI style.
