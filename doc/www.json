@@ -1,9 +1,9 @@
 {
-"project name": "TextToSpeechLocal",
-"blurb": "",
-"hero image": "doc/hero.png",
-"description": "TextToSpeechLocal",
-"starred": 0,
+"project name": "Local Neural Text-to-Speech App",
+"blurb": "A one-pyfile PyTorch+tk GUI for local neural text-to-speech synthesis.",
+"hero image": "doc/local_tts.png",
+"description": "TextToSpeechLocal.md",
+"starred": 4,
 "skip project": false,
 "entries": [
 ]
