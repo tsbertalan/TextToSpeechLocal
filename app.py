@@ -40,18 +40,17 @@ class SpeakerModels:
         self.processor = bundle.get_text_processor()
         self.tacotron2 = bundle.get_tacotron2().to(device)
 
-        vocoder_method = 'wavernn'
+        vocoder_method = 'waveglow'
 
 
         if vocoder_method == 'wavernn':
             unchunked_vocoder = bundle.get_vocoder().to(device)
-            
             def unchunked_vocode(specs, lengths):
                 return unchunked_vocoder(specs)[0]
-
             self.vocode = unchunked_vocode
+
         else:
-            assert vocoder_method == 'waveglow':
+            assert vocoder_method == 'waveglow'
             # Workaround to load model mapped on GPU
             # https://stackoverflow.com/a/61840832
             message_callback(f"loaded text processor.")
