@@ -41,47 +41,51 @@ class SpeakerModels:
         self.tacotron2 = bundle.get_tacotron2().to(device)
 
         use_waveglow = False
+        self.spectrogrammer_chunk_size = 12
+        vocoder_chunk_size = 10000
 
         if not use_waveglow:
             unchunked_vocoder = bundle.get_vocoder().to(device)
-            def chunked_vocode(spec, lengths):
-                # WaveRNN is very slow, so we'll break the spectrogram into chunks.
-                # spec is shape (batch, n_mel_channels, time)
-                batch_size, n_mel_channels, time = spec.shape
-                assert batch_size == 1
-                assert spec.shape[2] == lengths[0]
-                chunk_size = 32
-                n_chunks = np.math.ceil(spec.shape[2] / chunk_size)
-                chunks = []
-                final_chunk = None
-                for i in range(n_chunks):
-                    chunk = spec[:, :, i*chunk_size:(i+1)*chunk_size]
-                    if chunk.shape[2] < chunk_size:
-                        # Z = torch.zeros(1, 80, chunk_size - chunk.shape[2], device=chunk.device, dtype=chunk.dtype)
-                        # chunk = torch.cat([chunk, Z], dim=2)
-                        final_chunk = chunk
-                    else:
-                        chunks.append(chunk)
-                chunks = torch.cat(chunks, dim=0)
-                # message_callback(f"Created {n_chunks} chunks of shape {chunks.shape}.")
-                waveforms, _ = unchunked_vocoder(chunks)
-                if final_chunk is not None:
-                    final_waveform, _ = unchunked_vocoder(final_chunk.reshape(1, n_mel_channels, -1))
-                    # message_callback(f"Created {n_chunks} waveforms of shape {waveforms.shape}, plus a final waveform of shape {final_waveform.shape}.")
-                    # Rearrange the chunks back into a single waveform.
-                    waveforms = [waveforms[i] for i in range(len(waveforms))] + [final_waveform.reshape(-1)]
-                    waveform = torch.concat(waveforms, dim=0)
-                else:
-                    # message_callback(f"Created {n_chunks} waveforms of shape {waveforms.shape}.")
-                    waveform = torch.concat([waveforms[i] for i in range(len(waveforms))], dim=0)
+            # def chunked_vocode(spec, lengths):
+            #     # WaveRNN is very slow, so we'll break the spectrogram into chunks.
+            #     # spec is shape (batch, n_mel_channels, time)
+            #     batch_size, n_mel_channels, time = spec.shape
+            #     assert batch_size == 1
+            #     assert spec.shape[2] == lengths[0]
+            #     n_chunks = np.math.ceil(spec.shape[2] / vocoder_chunk_size)
+            #     chunks = []
+            #     final_chunk = None
+            #     for i in range(n_chunks):
+            #         chunk = spec[:, :, i*vocoder_chunk_size:(i+1)*vocoder_chunk_size]
+            #         if chunk.shape[2] < vocoder_chunk_size:
+            #             # Z = torch.zeros(1, 80, chunk_size - chunk.shape[2], device=chunk.device, dtype=chunk.dtype)
+            #             # chunk = torch.cat([chunk, Z], dim=2)
+            #             final_chunk = chunk
+            #         else:
+            #             chunks.append(chunk)
+            #     chunks = torch.cat(chunks, dim=0)
+            #     # message_callback(f"Created {n_chunks} chunks of shape {chunks.shape}.")
+            #     waveforms, _ = unchunked_vocoder(chunks)
+            #     if final_chunk is not None:
+            #         final_waveform, _ = unchunked_vocoder(final_chunk.reshape(1, n_mel_channels, -1))
+            #         # message_callback(f"Created {n_chunks} waveforms of shape {waveforms.shape}, plus a final waveform of shape {final_waveform.shape}.")
+            #         # Rearrange the chunks back into a single waveform.
+            #         waveforms = [waveforms[i] for i in range(len(waveforms))] + [final_waveform.reshape(-1)]
+            #         waveform = torch.concat(waveforms, dim=0)
+            #     else:
+            #         # message_callback(f"Created {n_chunks} waveforms of shape {waveforms.shape}.")
+            #         waveform = torch.concat([waveforms[i] for i in range(len(waveforms))], dim=0)
 
-                # Add back on the expected batch dimension.
-                waveform = waveform.reshape(batch_size, -1)
+            #     # Add back on the expected batch dimension.
+            #     waveform = waveform.reshape(batch_size, -1)
 
-                message_callback(f"Created a rearranged waveform of shape {waveform.shape}.")
-                return waveform
+            #     message_callback(f"Created a rearranged waveform of shape {waveform.shape}.")
+            #     return waveform
+            
+            def unchunked_vocode(specs, lengths):
+                return unchunked_vocoder(specs)[0]
 
-            self.vocode = chunked_vocode
+            self.vocode = unchunked_vocode
         else:
             # Workaround to load model mapped on GPU
             # https://stackoverflow.com/a/61840832
@@ -111,23 +115,58 @@ class SpeakerModels:
                 return waveform
             self.vocode = vocode
 
-
-
     def get_wave(self, text, message_callback=lambda s: None):
         """Given a string, return a sound wave."""
         with torch.no_grad():
             with torch.inference_mode():
-                processed, lengths = self.processor(text)
-                message_callback(f"preprocessed text of length {len(text)}.")
-                processed = processed.to(self.device)
-                # message_callback(f"moved to {self.device} ...")
+                tokens, lengths = self.processor(text)
+                intshape = lambda tensor: tuple(int(i) for i in tensor.shape)
+                message_callback(f"preprocessed text of length {len(text)}, making tokens of shape {intshape(tokens)}.")
+                tokens = tokens.to(self.device)
+
+                # tokens is shape (batch, ntok).
+                batch, ntok = tokens.shape
+                assert lengths[0] == ntok
                 lengths = lengths.to(self.device)
-                spec, spec_lengths, _ = self.tacotron2.infer(processed, lengths)
-                message_callback(f"created spectrogram.")
                 
-                waveforms = self.vocode(spec, spec_lengths)
+                # Re-chunk in groups of spectrogrammer_chunk_size tokens.
+                token_chunks = []
+                final_token_chunk = None
+                for i in range(np.math.ceil(ntok / self.spectrogrammer_chunk_size)):
+                    chunk = tokens[:, i*self.spectrogrammer_chunk_size:(i+1)*self.spectrogrammer_chunk_size]
+                    if chunk.shape[1] < self.spectrogrammer_chunk_size:
+                        final_token_chunk = chunk
+                    else:
+                        token_chunks.append(chunk)
+                token_chunks = torch.cat(token_chunks, dim=0)
+                token_lengths = torch.from_numpy(np.array([self.spectrogrammer_chunk_size] * len(token_chunks))).to(self.device)
+                chunk_spec, chunk_spec_lengths, _ = self.tacotron2.infer(token_chunks, token_lengths)
+                message_callback(f"created chunk spectrogram of shape {intshape(chunk_spec)}.")
+                if final_token_chunk is not None:
+                    l = torch.from_numpy(np.array([final_token_chunk.shape[1]])).to(self.device)
+                    final_chunk_spec, final_chunk_spec_lengths, _ = self.tacotron2.infer(final_token_chunk, l)
+
+                # Run the vocoder on each chunk.
+                waveforms_chunks = self.vocode(chunk_spec, chunk_spec_lengths)
+                message_callback(f"created chunk waveforms of shape {intshape(waveforms_chunks)}.")
+                waveforms_chunks =  [waveforms_chunks[i].reshape((batch, -1)) for i in range(len(waveforms_chunks))]
+                if final_token_chunk is not None:
+                    final_waveform_chunk = self.vocode(final_chunk_spec, final_chunk_spec_lengths)
+                    message_callback(f"created final waveform chunk of shape {intshape(final_waveform_chunk)}.")
+                    waveforms_chunks.append(final_waveform_chunk.reshape(batch, -1))
+                # message_callback(f"created waveform_chunks with shapes: {[intshape(w) for w in waveforms_chunks]}")
+                # print([intshape(w) for w in waveforms_chunks])
+                waveforms = torch.cat(waveforms_chunks, dim=1)
+                
+                # # message_callback(f"moved to {self.device} ...")
+                # spec, spec_lengths, _ = self.tacotron2.infer(tokens, lengths)
+                # message_callback(f"created spectrogram.")
+                
+                # waveforms = self.vocode(spec, spec_lengths)
+
+
                 waveform = waveforms[0].cpu().detach().numpy()
-                message_callback(f"created waveform of shape {waveform.shape}")
+                message_callback(f"created waveform of shape {intshape(waveform)}")
 
         return waveform
 
