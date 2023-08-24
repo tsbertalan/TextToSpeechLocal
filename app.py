@@ -28,92 +28,123 @@ def play_wave(array, sample_rate=22050, extra_delay=0, do_sleep=False):
 
 class SpeakerModels:
 
-    def __init__(self, message_callback=lambda s: None):
+    def __init__(self, message_callback=lambda s: None, speaker_silero='en_3'):
         """Contains the tokenizer, spectrogrammer (tacotron2), and vocoder (waveglow)."""
         torch.random.manual_seed(0)
-        device = "cuda" if torch.cuda.is_available() else "cpu"
+        use_tacotron = True
+        device = "cuda" if torch.cuda.is_available() and use_tacotron else "cpu"
         self.device = device
 
-        bundle = torchaudio.pipelines.TACOTRON2_WAVERNN_CHAR_LJSPEECH
-        message_callback(f"loaded tacotron2 on {device}.")
 
-        self.processor = bundle.get_text_processor()
-        self.tacotron2 = bundle.get_tacotron2().to(device)
+        if not use_tacotron:
+            
+            language = 'en'
+            model_id = 'v3_en'
+            speaker = speaker_silero  # en_0, en_1, ..., en_117, random
+            self.sample_rate = 48000
+            self.silero_model, _ = torch.hub.load(repo_or_dir='snakers4/silero-models',
+                                                model='silero_tts',
+                                                language=language,
+                                                speaker=model_id)
+            
+            self.silero_model.to(device)  # gpu or cpu
 
-        vocoder_method = 'melgan'
+            message_callback(f"loaded silero_tts on {device}.")
 
-
-        if vocoder_method == 'wavernn':
-            unchunked_vocoder = bundle.get_vocoder().to(device)
-            def unchunked_vocode(specs, lengths):
-                return unchunked_vocoder(specs)[0]
-            self.vocode = unchunked_vocode
-
-        elif vocoder_method == 'melgan':
-            melgan = torch.hub.load('seungwonpark/melgan', 'melgan')
-            melgan.eval()
-            melgan = melgan.to(device)
-            message_callback(f"loaded Mel-GAN on {device}.")
-
-            def vocode(spec, unused_lengths):
+            def _get_wave(text, message_callback=lambda s: None):
+                """Given a string, return a sound wave."""
+                intshape = lambda tensor: tuple(int(i) for i in tensor.shape)
                 with torch.no_grad():
-                    waveform = melgan.inference(spec)
-                return waveform.reshape(spec.shape[0], -1)
-            self.vocode = vocode
+                    audio = self.silero_model.apply_tts(text=text, speaker=speaker, sample_rate=self.sample_rate)
+                message_callback(f"created waveform of shape {intshape(audio)}")
+                return audio
+            
+            self.get_wave = _get_wave
 
         else:
-            assert vocoder_method == 'waveglow'
-            # Workaround to load model mapped on GPU
-            # https://stackoverflow.com/a/61840832
-            message_callback(f"loaded text processor.")
-            waveglow = torch.hub.load(
-                "NVIDIA/DeepLearningExamples:torchhub",
-                "nvidia_waveglow",
-                model_math="fp32",
-                pretrained=False,
-            )
-            checkpoint = torch.hub.load_state_dict_from_url(
-                "https://api.ngc.nvidia.com/v2/models/nvidia/waveglowpyt_fp32/versions/1/files/nvidia_waveglowpyt_fp32_20190306.pth",  # noqa: E501
-                progress=True,
-                map_location=device,
-            )
-            state_dict = {key.replace("module.", ""): value for key, value in checkpoint["state_dict"].items()}
+            self.sample_rate = 22050
+            bundle = torchaudio.pipelines.TACOTRON2_WAVERNN_CHAR_LJSPEECH
+            message_callback(f"loaded tacotron2 on {device}.")
 
-            waveglow.load_state_dict(state_dict)
-            waveglow = waveglow.remove_weightnorm(waveglow)
-            waveglow = waveglow.to(device)
-            waveglow.eval()
-            self.waveglow = waveglow
-            message_callback(f"loaded waveglow on {device}.")
+            self.processor = bundle.get_text_processor()
+            self.tacotron2 = bundle.get_tacotron2().to(device)
 
-            def vocode(spec, unused_lengths):
-                return self.waveglow.infer(spec)
-            self.vocode = vocode
+            vocoder_method = 'waveglow'
 
-    def get_wave(self, text, message_callback=lambda s: None):
-        """Given a string, return a sound wave."""
-        with torch.no_grad():
-            with torch.inference_mode():
-                tokens, lengths = self.processor(text)
-                intshape = lambda tensor: tuple(int(i) for i in tensor.shape)
-                message_callback(f"Preprocessed text of length {len(text)}, making tokens of shape {intshape(tokens)}.")
-                tokens = tokens.to(self.device)
-                lengths = lengths.to(self.device)
-                
-                # message_callback(f"moved to {self.device} ...")
-                # message_callback(f"Lengths: {lengths}")
-                # print("lengths:", lengths)
-                spec, spec_lengths, _ = self.tacotron2.infer(tokens, lengths)
-                message_callback(f"Created spectrogram of shape {intshape(spec)}")
+            if vocoder_method == 'wavernn':
+                unchunked_vocoder = bundle.get_vocoder().to(device)
+                def unchunked_vocode(specs, lengths):
+                    return unchunked_vocoder(specs)[0]
+                self.vocode = unchunked_vocode
 
-                waveforms = self.vocode(spec, spec_lengths)
-                message_callback(f"Vocoder output has shape {intshape(waveforms)}")
-                waveform = waveforms[0].cpu().detach().numpy()
-                message_callback(f"created waveform of shape {intshape(waveform)}")
+            elif vocoder_method == 'melgan':
+                melgan = torch.hub.load('seungwonpark/melgan', 'melgan')
+                melgan.eval()
+                melgan = melgan.to(device)
+                message_callback(f"loaded Mel-GAN on {device}.")
 
-        return waveform
+                def vocode(spec, unused_lengths):
+                    with torch.no_grad():
+                        waveform = melgan.inference(spec)
+                    return waveform.reshape(spec.shape[0], -1)
+                self.vocode = vocode
 
-    def play_wave(self, array, sample_rate=22050*1.2, extra_delay=0):
+            else:
+                assert vocoder_method == 'waveglow'
+                # Workaround to load model mapped on GPU
+                # https://stackoverflow.com/a/61840832
+                message_callback(f"loaded text processor.")
+                waveglow = torch.hub.load(
+                    "NVIDIA/DeepLearningExamples:torchhub",
+                    "nvidia_waveglow",
+                    model_math="fp32",
+                    pretrained=False,
+                )
+                checkpoint = torch.hub.load_state_dict_from_url(
+                    "https://api.ngc.nvidia.com/v2/models/nvidia/waveglowpyt_fp32/versions/1/files/nvidia_waveglowpyt_fp32_20190306.pth",  # noqa: E501
+                    progress=True,
+                    map_location=device,
+                )
+                state_dict = {key.replace("module.", ""): value for key, value in checkpoint["state_dict"].items()}
+
+                waveglow.load_state_dict(state_dict)
+                waveglow = waveglow.remove_weightnorm(waveglow)
+                waveglow = waveglow.to(device)
+                waveglow.eval()
+                self.waveglow = waveglow
+                message_callback(f"loaded waveglow on {device}.")
+
+                def vocode(spec, unused_lengths):
+                    return self.waveglow.infer(spec)
+                self.vocode = vocode
+
+            def _get_wave(text, message_callback=lambda s: None):
+                """Given a string, return a sound wave."""
+                with torch.no_grad():
+                    with torch.inference_mode():
+                        tokens, lengths = self.processor(text)
+                        intshape = lambda tensor: tuple(int(i) for i in tensor.shape)
+                        message_callback(f"Preprocessed text of length {len(text)}, making tokens of shape {intshape(tokens)}.")
+                        tokens = tokens.to(self.device)
+                        lengths = lengths.to(self.device)
+                        
+                        # message_callback(f"moved to {self.device} ...")
+                        # message_callback(f"Lengths: {lengths}")
+                        # print("lengths:", lengths)
+                        spec, spec_lengths, _ = self.tacotron2.infer(tokens, lengths)
+                        message_callback(f"Created spectrogram of shape {intshape(spec)}")
+
+                        waveforms = self.vocode(spec, spec_lengths)
+                        message_callback(f"Vocoder output has shape {intshape(waveforms)}")
+                        waveform = waveforms[0].cpu().detach().numpy()
+                        message_callback(f"created waveform of shape {intshape(waveform)}")
+                return waveform
+
+            self.get_wave = _get_wave
+
+    def play_wave(self, array, sample_rate=None, extra_delay=0):
+        if sample_rate is None:
+            sample_rate = self.sample_rate
         play_wave(array, sample_rate, extra_delay)
 
     def play_text(self, text, **kw_player):
@@ -157,8 +188,8 @@ def breakup(long_text):
     if i1 < len(long_text):
         output.append(long_text[i1:])
 
-    print('Broke up long text into', len(output), 'chunks:')
-    print(' \n'.join([f'>>{chunk}<<' for chunk in output]))
+    # print('Broke up long text into', len(output), 'chunks:')
+    # print(' \n'.join([f'>>{chunk}<<' for chunk in output]))
 
     return output
 
@@ -205,33 +236,49 @@ class MessageTimer:
 
 
 
-def text_to_audio_worker(text_queue, audio_queue, message_queue):
+def text_to_audio_worker(text_queue, audio_queue, message_queue, command_queue, speaker_silero):
     # Make the speaker models.
     message_callback = MessageTimer("TTS MODELS", message_queue)
     message_callback("Loading models...", tag='loading', notime=True)
-    speaker_models = SpeakerModels(message_callback=message_callback)
+    speaker_models = SpeakerModels(message_callback=message_callback, speaker_silero=speaker_silero)
+    message_queue.put(dict(sample_rate=speaker_models.sample_rate))
     message_callback("Models loaded.", tag='loading')
 
     # Every time we see something in the queue, take it off and TTS it.
     while True:
+        if not command_queue.empty():
+            command = command_queue.get()
+            if command == "time to die":
+                break
         if not text_queue.empty():
             text = text_queue.get()
+            print("Got something in the queue:", text)
             message_callback.tic()
             wave = speaker_models.get_wave(text, message_callback=message_callback)
+            print('Put wave of shape', wave.shape, 'in the audio queue.')
             audio_queue.put(wave)
         else:
             time.sleep(0.05)
 
 
-def audio_speaking_worker(audio_queue, message_queue):
+def audio_speaking_worker(audio_queue, message_queue, command_queue):
     # Every time we see something in the queue, take it off and speak it.
     message_callback = MessageTimer("SPEAKER", message_queue)
+    samp_rate = 22050
     while True:
+        if not command_queue.empty():
+            command = command_queue.get()
+            if str(command) == "time to die":
+                break
+            else:
+                if isinstance(command, dict):
+                    if 'sample_rate' in command:
+                        samp_rate = command['sample_rate']
         if not audio_queue.empty():
             wave = audio_queue.get()
-            n_samp = wave.size
-            message_callback(f"{n_samp} samples to speak ...", tag='speaking', notime=True)
-            play_wave(wave)  # blocking
+            n_samp = np.asarray(wave).size
+            message_callback(f"{n_samp} samples to speak at sample rate {samp_rate} ...", tag='speaking', notime=True)
+            play_wave(wave, sample_rate=samp_rate)
             message_callback(f"{n_samp} samples spoken.", tag='speaking')
         else:
             time.sleep(0.05)
@@ -239,17 +286,22 @@ def audio_speaking_worker(audio_queue, message_queue):
 
 class SpeakerApp(tk.Tk):
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args, speaker_silero='en_5', **kwargs):
         super().__init__(*args, **kwargs)    
         self.text_queue = queue.Queue()
         self.audio_queue = queue.Queue()
+        self.text_command_queue = queue.Queue()
+        self.audio_command_queue = queue.Queue()
         self.worker_message_queue = queue.Queue()
+
+        self.sample_rate = 22050
 
         self.title("Speaker")
         self.geometry("1000x1000")
         self.resizable(False, False)
 
-        self.label = tk.Label(self, text="Enter text to speak:")
+        # self.label = tk.Label(self, text=f"Enter text to speak with silero voice {speaker_silero}.")
+        self.label = tk.Label(self, text=f"Enter text to speak.")
         self.label.pack()
 
         text_width = 100
@@ -283,9 +335,9 @@ class SpeakerApp(tk.Tk):
         self.message_textbox.pack()
 
         # Start the worker threads.
-        self.text_to_audio_worker = threading.Thread(target=text_to_audio_worker, args=(self.text_queue, self.audio_queue, self.worker_message_queue))
+        self.text_to_audio_worker = threading.Thread(target=text_to_audio_worker, args=(self.text_queue, self.audio_queue, self.worker_message_queue, self.text_command_queue, speaker_silero))
         self.text_to_audio_worker.start()
-        self.audio_speaking_worker = threading.Thread(target=audio_speaking_worker, args=(self.audio_queue, self.worker_message_queue))
+        self.audio_speaking_worker = threading.Thread(target=audio_speaking_worker, args=(self.audio_queue, self.worker_message_queue, self.audio_command_queue))
         self.audio_speaking_worker.start()
 
         # Ensure the queue_label gets updated regularly.
@@ -302,14 +354,24 @@ class SpeakerApp(tk.Tk):
         self.audio_queue_label["text"] = f"Speaker queue length: {self.audio_queue.qsize()}"
         self.after(self.label_update_delay, self.update_audio_queue_label)
 
+    def handle_nonstring_message(self, message):
+        if isinstance(message, dict):
+            if 'sample_rate' in message:
+                self.audio_command_queue.put(message)
+
     def update_message_label(self):
         if not self.worker_message_queue.empty():
             message = self.worker_message_queue.get()
-            # Append the message (after newline) to our message box existing text, and scroll to the bottom.
-            self.message_textbox.configure(state=tk.NORMAL)
-            self.message_textbox.insert(tk.END, message + "\n")
-            self.message_textbox.see(tk.END)
-            self.message_textbox.configure(state=tk.DISABLED)
+            if not isinstance(message, str):
+                # The workers can pass data back to use also.
+                self.handle_nonstring_message(message)
+
+            else:
+                # Append the message (after newline) to our message box existing text, and scroll to the bottom.
+                self.message_textbox.configure(state=tk.NORMAL)
+                self.message_textbox.insert(tk.END, message + "\n")
+                self.message_textbox.see(tk.END)
+                self.message_textbox.configure(state=tk.DISABLED)
             
         self.after(self.label_update_delay, self.update_message_label)
         
@@ -324,16 +386,35 @@ class SpeakerApp(tk.Tk):
 
     def destroy(self):
         # Clicking the close button should just kill the whole process, threads be damned.
+        # Drop a bunch of "time to die" messages into the command queue.
+        for _ in range(10):
+            self.text_command_queue.put("time to die")
+            self.audio_command_queue.put("time to die")
+        # Wait a little while for the threads to die.
+        for _ in range(100):
+            tts_alive = self.text_to_audio_worker.is_alive()
+            speaker_alive = self.audio_speaking_worker.is_alive()
+            if not self.text_to_audio_worker.is_alive() and not self.audio_speaking_worker.is_alive():
+                break
+            time.sleep(0.1)
         super().destroy()
-        import os
-        os._exit(0)
+        # If the threads are still alive, just kill everything.
+        if tts_alive or speaker_alive:
+            print(f"Threads still alive: TTS={tts_alive}, speaker={speaker_alive}")
+            print("Threads still alive. Killing everything.")
+            import os
+            os._exit(0)
         
 
 if __name__ == "__main__":
     print("Starting app...")
-    app = SpeakerApp()
     try:
+        # for i in range(5, 118):
+        #     speaker_silero = f'en_{i}'  # I like 0, 2, 5, 6, 10, 11, 13, 14, 15, 25
+        #     print(f"Trying speaker {speaker_silero}...")
+        app = SpeakerApp()#speaker_silero=speaker_silero)
         app.mainloop()
     except KeyboardInterrupt:
         print("Exiting app due to KeyboardInterrupt.")
-        app.destroy()
+        if 'app' in locals():
+            app.destroy()
