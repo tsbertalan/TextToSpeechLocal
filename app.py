@@ -1,7 +1,7 @@
 # https://pytorch.org/audio/stable/tutorials/tacotron2_pipeline_tutorial.html
 # Let's adapt the above tut1 to make a little tk app that says things you put in a text box, after you click a "speak" button.
 
-import tkinter as tk
+import tkinter as tk, re
 import torch, torchaudio, numpy as np
 import sounddevice as sd, time
 
@@ -163,28 +163,47 @@ def breakup(long_text):
     output = []
     i1 = 0
     i2 = i1 + 1
-    enders = " \n\t\"'”’"
-    not_enders = ["Mr", ]
+    # regexes that indicate an end of chunk.
+    # Must occur at the *end* of the tested string.
+    # enders = " \n\t\"'”’"
+    enders = [
+        re.compile(s) for s in [
+            # Period, question mark, or exclamation mark, or quote, or apostrophe; followed by whitespace followed by end-of-string:
+            r'(.|\n)*[.?!\'”’][ \n\t]+$',
+            # Double newline followed by end-of-string:
+            r'(.|\n)*\n\n$',
+        ]
+    ]
+    # not_enders = ["Mr", ]
+    # Regexes that will countermand findings from one of the above.
+    not_enders = [
+        re.compile(s) for s in [
+            # Mr., Mrs., Ms., Dr., St., etc. followed by whitespace followed by end-of-string.
+            r'(.|\n)*(Mr|Mrs|Ms|Dr|St)[.][ \n\t]+$',
+            # A (possibly multi-digit) number followed by a period followed by whitespace followed by end-of-string.
+            r'(.|\n)*\d+[.][ \n\t]+$',
+        ]
+    ]
+
     long_text = long_text.strip()
     if len(long_text) == 0:
         return []
     while i2 < len(long_text):
-        if long_text[i2] in ".?!":
-            if i2 == len(long_text) - 1 or long_text[i2+1] in enders:
-                chunk = long_text[i1:i2]
-                for c in enders:
-                    if chunk.startswith(c):
-                        chunk = chunk[1:]
+        chunk = long_text[i1:i2]
+        if i2 == len(long_text) - 1 or any([r.match(chunk) for r in enders]):
+            print(f'Posible chunk: >>{repr(chunk)}<<')
+            chunk
+            if not any([r.match(chunk) for r in not_enders]):
                 chunk = chunk.strip()
-                ok_to_add = True
-                for not_ender in not_enders:
-                    if chunk.endswith(not_ender):
-                        ok_to_add = False
-                if ok_to_add:
-                    output.append(chunk)
-                    i1 = i2 + 1
-                    i2 = i1 + 1
-        i2 += 1
+                print(f'Shortened good chunk: >>{repr(chunk)}<<')
+                output.append(chunk)
+                i1 = i2
+                i2 = i1 + 1
+            else:
+                print(f'Not a chunk: >>{repr(chunk)}<<')
+                i2 += 1
+        else:
+            i2 += 1
 
     if i1 < len(long_text):
         output.append(long_text[i1:])
