@@ -227,17 +227,20 @@ import queue, threading
 
 class MessageTimer:
 
-    def __init__(self, label, message_queue, tag_padded_len=20):
+    def __init__(self, label, message_queue, tag_padded_len=21):
         self.label = label
         self.message_queue = message_queue
         self.tag_padded_len = tag_padded_len
         self.last_message_times = {}
         self.tic()
+        self.target_priority = 0
 
     def tic(self, tag=None):
         self.last_message_times[tag] = time.time()
 
-    def __call__(self, s, tag=None, notime=False):
+    def __call__(self, s, tag=None, notime=False, priority=None):
+        if priority is None:
+            priority = self.target_priority
         elapsed = time.time() - self.last_message_times.get(tag, self.last_message_times[None])
         self.last_message_times[tag] = time.time()
         if not notime:
@@ -249,13 +252,15 @@ class MessageTimer:
             before_colon += ' ' * (self.tag_padded_len - len(before_colon))
 
         tagged = f"{before_colon}: {s}"
-        self.message_queue.put(tagged)
+
+        if priority >= self.target_priority:
+            self.message_queue.put(tagged)
 
 
 
 def text_to_audio_worker(text_queue, audio_queue, message_queue, command_queue, speaker_silero):
     # Make the speaker models.
-    message_callback = MessageTimer("TTS MODELS", message_queue)
+    message_callback = MessageTimer("TTS MODEL", message_queue)
     message_callback("Loading models...", tag='loading', notime=True)
     speaker_models = SpeakerModels(message_callback=message_callback, speaker_silero=speaker_silero)
     message_queue.put(dict(sample_rate=speaker_models.sample_rate))
@@ -269,16 +274,17 @@ def text_to_audio_worker(text_queue, audio_queue, message_queue, command_queue, 
                 break
         if not text_queue.empty():
             text = text_queue.get()
+            message_callback(f"Generating: {repr(text)}", notime=True, tag='text')
             message_callback.tic('tts')
             try:
                 wave = speaker_models.get_wave(text, message_callback=message_callback)
                 if isinstance(wave, torch.Tensor):
                     wave = wave.cpu().detach().numpy()
                 # Print the size padded to 16 characters.
-                message_callback(f"{wave.size:10} samples generated.", tag='tts')
-                audio_queue.put(wave)
+                message_callback(f"{wave.size:10} samples generated.", tag='tts', priority=-1)
+                audio_queue.put((text, wave))
             except Exception as e:
-                message_callback(f"Exception: {e}", tag='tts')
+                message_callback(f"Exception: {e}", tag='tts', priority=1)
         else:
             time.sleep(0.05)
 
@@ -297,14 +303,15 @@ def audio_speaking_worker(audio_queue, message_queue, command_queue):
                     if 'sample_rate' in command:
                         samp_rate = command['sample_rate']
         if not audio_queue.empty():
-            wave = audio_queue.get()
+            text, wave = audio_queue.get()
             n_samp = np.asarray(wave).size
             message_callback.tic('speaking')
             try:
+                message_callback(f"Speaking: {repr(text)}", notime=True, tag='text')
                 play_wave(wave, sample_rate=samp_rate)
-                message_callback(f"{n_samp:10} samples spoken at sample rate {samp_rate}.", tag='speaking')
+                message_callback(f"{n_samp:10} samples spoken at sample rate {samp_rate}.", tag='speaking', priority=-1)
             except Exception as e:
-                message_callback(f"Exception: {e}", tag='speaking')
+                message_callback(f"Exception: {e}", tag='speaking', priority=1)
         else:
             time.sleep(0.05)
 
@@ -322,14 +329,14 @@ class SpeakerApp(tk.Tk):
         self.sample_rate = 22050
 
         self.title("Speaker")
-        self.geometry("1000x1000")
+        self.geometry("3000x1000")
         self.resizable(False, False)
 
         # self.label = tk.Label(self, text=f"Enter text to speak with silero voice {speaker_silero}.")
         self.label = tk.Label(self, text=f"Enter text to speak.")
         self.label.pack()
 
-        text_width = 100
+        text_width = 360
         
         # Scrollable textbox for the input:
         self.input_textbox_frame = tk.Frame(self)
@@ -350,13 +357,17 @@ class SpeakerApp(tk.Tk):
         self.audio_queue_label = tk.Label(self, text="Audio queue length: 0")
         self.audio_queue_label.pack()
 
+        # Make the log textbox not wrap, but instead have a horizontal scrollbar.
         self.message_textbox_frame = tk.Frame(self)
         self.message_textbox_frame.pack()
         self.message_textbox_label = tk.Label(self.message_textbox_frame, text="Messages:")
-        self.message_textbox = tk.Text(self.message_textbox_frame, height=32, width=text_width, state=tk.DISABLED)
+        self.message_textbox = tk.Text(self.message_textbox_frame, height=32, width=text_width, state=tk.DISABLED, wrap=tk.NONE)
         message_textbox_scrollbar = tk.Scrollbar(self.message_textbox_frame, command=self.message_textbox.yview)
         self.message_textbox["yscrollcommand"] = message_textbox_scrollbar.set
         message_textbox_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        message_textbox_scrollbar_h = tk.Scrollbar(self.message_textbox_frame, command=self.message_textbox.xview, orient=tk.HORIZONTAL)
+        self.message_textbox["xscrollcommand"] = message_textbox_scrollbar_h.set
+        message_textbox_scrollbar_h.pack(side=tk.BOTTOM, fill=tk.X)
         self.message_textbox.pack()
 
         # Start the worker threads.
@@ -392,10 +403,13 @@ class SpeakerApp(tk.Tk):
                 self.handle_nonstring_message(message)
 
             else:
-                # Append the message (after newline) to our message box existing text, and scroll to the bottom.
+                # Append the message (after newline) to our message box existing text, and scroll to the bottom in the y direction.
                 self.message_textbox.configure(state=tk.NORMAL)
                 self.message_textbox.insert(tk.END, message + "\n")
+                # Scroll to the bottom, but keep the x position the same.
+                x_pos = self.message_textbox.xview()[0]
                 self.message_textbox.see(tk.END)
+                self.message_textbox.xview_moveto(x_pos)
                 self.message_textbox.configure(state=tk.DISABLED)
             
         self.after(self.label_update_delay, self.update_message_label)
@@ -432,7 +446,6 @@ class SpeakerApp(tk.Tk):
         
 
 if __name__ == "__main__":
-    print("Starting app...")
     try:
         app = SpeakerApp()
         app.mainloop()
