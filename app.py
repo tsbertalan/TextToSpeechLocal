@@ -28,7 +28,7 @@ def play_wave(array, sample_rate=22050, extra_delay=0, do_sleep=False):
 
 class SpeakerModels:
 
-    def __init__(self, message_callback=lambda s: None, speaker_silero='en_3'):
+    def __init__(self, message_callback=lambda s: None, speaker_silero=None):
         """Contains the tokenizer, spectrogrammer (tacotron2), and vocoder (waveglow)."""
         torch.random.manual_seed(0)
         use_tacotron = False
@@ -41,6 +41,8 @@ class SpeakerModels:
             
             language = 'en'
             model_id = 'v3_en'
+            if speaker_silero is None:
+                speaker_silero = 'en_10'   # I like 0, 10, 13, 14, 15, 25
             speaker = speaker_silero  # en_0, en_1, ..., en_117, random
             self.sample_rate = 48000
             self.silero_model, _ = torch.hub.load(repo_or_dir='snakers4/silero-models',
@@ -50,14 +52,13 @@ class SpeakerModels:
             
             self.silero_model.to(device)  # gpu or cpu
 
-            message_callback(f"loaded silero_tts on {device}.")
+            message_callback(f"loaded silero_tts (model_id={model_id}, speaker={speaker}) on {device}.")
 
             def _get_wave(text, message_callback=lambda s: None):
                 """Given a string, return a sound wave."""
                 intshape = lambda tensor: tuple(int(i) for i in tensor.shape)
                 with torch.no_grad():
                     audio = self.silero_model.apply_tts(text=text, speaker=speaker, sample_rate=self.sample_rate)
-                message_callback(f"created waveform of shape {intshape(audio)}")
                 return audio
             
             self.get_wave = _get_wave
@@ -268,9 +269,13 @@ def text_to_audio_worker(text_queue, audio_queue, message_queue, command_queue, 
                 break
         if not text_queue.empty():
             text = text_queue.get()
-            message_callback.tic()
+            message_callback.tic('tts')
             try:
                 wave = speaker_models.get_wave(text, message_callback=message_callback)
+                if isinstance(wave, torch.Tensor):
+                    wave = wave.cpu().detach().numpy()
+                # Print the size padded to 16 characters.
+                message_callback(f"{wave.size:10} samples generated.", tag='tts')
                 audio_queue.put(wave)
             except Exception as e:
                 message_callback(f"Exception: {e}", tag='tts')
@@ -294,10 +299,10 @@ def audio_speaking_worker(audio_queue, message_queue, command_queue):
         if not audio_queue.empty():
             wave = audio_queue.get()
             n_samp = np.asarray(wave).size
-            message_callback(f"{n_samp} samples to speak at sample rate {samp_rate} ...", tag='speaking', notime=True)
+            message_callback.tic('speaking')
             try:
                 play_wave(wave, sample_rate=samp_rate)
-                message_callback(f"{n_samp} samples spoken.", tag='speaking')
+                message_callback(f"{n_samp:10} samples spoken at sample rate {samp_rate}.", tag='speaking')
             except Exception as e:
                 message_callback(f"Exception: {e}", tag='speaking')
         else:
@@ -306,7 +311,7 @@ def audio_speaking_worker(audio_queue, message_queue, command_queue):
 
 class SpeakerApp(tk.Tk):
 
-    def __init__(self, *args, speaker_silero='en_5', **kwargs):
+    def __init__(self, *args, speaker_silero=None, **kwargs):
         super().__init__(*args, **kwargs)    
         self.text_queue = queue.Queue()
         self.audio_queue = queue.Queue()
@@ -429,10 +434,7 @@ class SpeakerApp(tk.Tk):
 if __name__ == "__main__":
     print("Starting app...")
     try:
-        # for i in range(5, 118):
-        #     speaker_silero = f'en_{i}'  # I like 0, 2, 5, 6, 10, 11, 13, 14, 15, 25
-        #     print(f"Trying speaker {speaker_silero}...")
-        app = SpeakerApp()#speaker_silero=speaker_silero)
+        app = SpeakerApp()
         app.mainloop()
     except KeyboardInterrupt:
         print("Exiting app due to KeyboardInterrupt.")
