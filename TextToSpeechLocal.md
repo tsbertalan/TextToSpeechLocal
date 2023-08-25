@@ -4,16 +4,16 @@
 
 On Android, [Pocket](http://getpocket.com) provides a nice text-to-speech feature that lets you listen to articles you've saved that you don't care enough about to actually read with your human eyes and full attention. But they don't do this in their browser-based desktop site.
 
-So, here's a crappy little app that does that--a local-only text-to-speech app in PyTorch using TacoTron2 for spectrogram generation and WaveGlow for audio synthesis.
+So, here's a crappy little app that does that. It's a local-only text-to-speech app in PyTorch using TacoTron2 for spectrogram generation and WaveGlow for audio synthesis.
 
-Two worker threads handle the work--one to make the waves, and the other to speak them. The GUI breaks the given text up into chunks at sentence-like boundaries and pushes them onto a first queue.
+Two worker threads handle the work: one to make the waves, and the other to speak them. The GUI breaks the given text up into chunks at sentence-like boundaries and pushes them onto a first queue.
 
 The first worker thread preprocesses this text to tokens, tacotron2s it to a spectrogram, waveglows it to a big 1D array, and pushes that to a second queue.
 
 The second worker thread pops the 1D array off the queue, and plays it out loud (blocking that thread appropriately).
 
 There's a nice little GUI that lets you type in text and add it to the queue,
-with some information that's probably ultimately useless to the user--length of the two queues, and messages returned from the two workers in a autoscrolling log box.
+with some information that's probably ultimately useless to the user; namely the length of the two queues, and messages returned from the two workers in a autoscrolling log box.
 
 Some problems I could eventually fix:
 
@@ -26,7 +26,7 @@ Some problems I could eventually fix:
 - [ ] Use a prettier UI style.
 - [ ] Make the UI at least somewhat rescalable.
 - [ ] Add a checkbox to enable pausing autoscrolling of the log (or just drop the log if the UI is informative enough).
-- [ ] Get the memory usage down--it's something like 5.3GB! Maybe quantized models could help with this.
+- [ ] Get the memory usage down. It's something like 5.3GB! Maybe quantized models could help with this. *Well, actually, Process Explorer reports a much smaller number? Hard to tell.*
 
 ## Installation and Usage
 

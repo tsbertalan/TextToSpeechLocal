@@ -31,12 +31,13 @@ class SpeakerModels:
     def __init__(self, message_callback=lambda s: None, speaker_silero='en_3'):
         """Contains the tokenizer, spectrogrammer (tacotron2), and vocoder (waveglow)."""
         torch.random.manual_seed(0)
-        use_tacotron = True
+        use_tacotron = False
         device = "cuda" if torch.cuda.is_available() and use_tacotron else "cpu"
         self.device = device
 
 
         if not use_tacotron:
+            torch._C._jit_set_profiling_mode(False)
             
             language = 'en'
             model_id = 'v3_en'
