@@ -190,23 +190,19 @@ def breakup(long_text):
         return []
     while i2 < len(long_text):
         chunk = long_text[i1:i2]
-        if i2 == len(long_text) - 1 or any([r.match(chunk) for r in enders]):
-            print(f'Posible chunk: >>{repr(chunk)}<<')
-            chunk
-            if not any([r.match(chunk) for r in not_enders]):
+        if any(r.match(chunk) for r in enders):
+            if not any(r.match(chunk) for r in not_enders):
                 chunk = chunk.strip()
-                print(f'Shortened good chunk: >>{repr(chunk)}<<')
                 output.append(chunk)
                 i1 = i2
                 i2 = i1 + 1
             else:
-                print(f'Not a chunk: >>{repr(chunk)}<<')
                 i2 += 1
         else:
             i2 += 1
 
-    if i1 < len(long_text):
-        output.append(long_text[i1:])
+    if i1 < len(long_text)-1:
+        output.append(long_text[i1:].strip())
 
     # print('Broke up long text into', len(output), 'chunks:')
     # print(' \n'.join([f'>>{chunk}<<' for chunk in output]))
@@ -272,11 +268,12 @@ def text_to_audio_worker(text_queue, audio_queue, message_queue, command_queue, 
                 break
         if not text_queue.empty():
             text = text_queue.get()
-            print("Got something in the queue:", text)
             message_callback.tic()
-            wave = speaker_models.get_wave(text, message_callback=message_callback)
-            print('Put wave of shape', wave.shape, 'in the audio queue.')
-            audio_queue.put(wave)
+            try:
+                wave = speaker_models.get_wave(text, message_callback=message_callback)
+                audio_queue.put(wave)
+            except Exception as e:
+                message_callback(f"Exception: {e}", tag='tts')
         else:
             time.sleep(0.05)
 
@@ -298,8 +295,11 @@ def audio_speaking_worker(audio_queue, message_queue, command_queue):
             wave = audio_queue.get()
             n_samp = np.asarray(wave).size
             message_callback(f"{n_samp} samples to speak at sample rate {samp_rate} ...", tag='speaking', notime=True)
-            play_wave(wave, sample_rate=samp_rate)
-            message_callback(f"{n_samp} samples spoken.", tag='speaking')
+            try:
+                play_wave(wave, sample_rate=samp_rate)
+                message_callback(f"{n_samp} samples spoken.", tag='speaking')
+            except Exception as e:
+                message_callback(f"Exception: {e}", tag='speaking')
         else:
             time.sleep(0.05)
 
