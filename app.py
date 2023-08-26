@@ -484,9 +484,10 @@ class SpeakerApp(tk.Tk):
             button=button,
             audio=audio,
             playing=False,
-            queued=False,
+            queued=True,
         )
         self.results[text_id] = info
+        self.play_queue.put(info)
         # Add a callback to the button that will turn it green when its audio is playing.
         button.config(command=lambda: self.start_from_button(text_id))
 
