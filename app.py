@@ -32,36 +32,72 @@ class SpeakerModels:
         """Contains the tokenizer, spectrogrammer (tacotron2), and vocoder (waveglow)."""
         torch.random.manual_seed(0)
         use_tacotron = False
-        device = "cuda" if torch.cuda.is_available() and use_tacotron else "cpu"
+        device = (
+            "cuda" if torch.cuda.is_available()
+            # and use_tacotron
+            else "cpu"
+        )
         self.device = device
 
 
         if not use_tacotron:
-            torch._C._jit_set_profiling_mode(False)
-            
-            language = 'en'
-            model_id = 'v3_en'
-            if speaker_silero is None:
-                speaker_silero = 'en_10'   # I like 0, 10, 13, 14, 15, 25
-            speaker = speaker_silero  # en_0, en_1, ..., en_117, random
-            self.sample_rate = 48000
-            self.silero_model, _ = torch.hub.load(repo_or_dir='snakers4/silero-models',
-                                                model='silero_tts',
-                                                language=language,
-                                                speaker=model_id)
-            
-            self.silero_model.to(device)  # gpu or cpu
+            use_audiocraft = False  # This doesn't work. Not TTS; for sound effects instead, it seems.
+            if use_audiocraft:
 
-            message_callback(f"loaded silero_tts (model_id={model_id}, speaker={speaker}) on {device}.")
+                import torchaudio
+                from audiocraft.models import AudioGen
+                # from audiocraft.data.audio import audio_write
 
-            def _get_wave(text, message_callback=lambda s: None):
-                """Given a string, return a sound wave."""
-                intshape = lambda tensor: tuple(int(i) for i in tensor.shape)
-                with torch.no_grad():
-                    audio = self.silero_model.apply_tts(text=text, speaker=speaker, sample_rate=self.sample_rate)
-                return audio
-            
-            self.get_wave = _get_wave
+                model = AudioGen.get_pretrained('facebook/audiogen-medium')
+                # model.set_generation_params(duration=5)  # generate 5 seconds.
+                self.sample_rate = 48000
+                # descriptions = ['dog barking', 'sirene of an emergency vehicle', 'footsteps in a corridor']
+                # wav = model.generate(descriptions)  # generates 3 samples.
+
+                # for idx, one_wav in enumerate(wav):
+                #     # Will save under {idx}.wav, with loudness normalization at -14 db LUFS.
+                #     audio_write(f'{idx}', one_wav.cpu(), model.sample_rate, strategy="loudness", loudness_compressor=True)
+
+                def _get_wave(text, message_callback=lambda s: None):
+                    """Given a string, return a sound wave for a narration."""
+                    text = "A narrator speaking the following text: \"" + text + "\""  # Add a little intro because this is a general "sound foundation model", not a simple TTS.
+                    message_callback(f"Prompt: {repr(text)}", notime=True, tag='text')
+                    descriptions = [text]
+                    wavs = model.generate(descriptions)
+                    wavs = torch.squeeze(wavs)
+                    message_callback(f"Generated {len(wavs)} wavs.", tag='text')
+                    return wavs
+                
+                self.get_wave = _get_wave
+
+
+            else:
+
+                torch._C._jit_set_profiling_mode(False)
+                
+                language = 'en'
+                model_id = 'v3_en'
+                if speaker_silero is None:
+                    speaker_silero = 'en_13'   # I like 0, 10, 13, 14, 15, 25
+                speaker = speaker_silero  # en_0, en_1, ..., en_117, random
+                self.sample_rate = 48000
+                self.silero_model, _ = torch.hub.load(repo_or_dir='snakers4/silero-models',
+                                                    model='silero_tts',
+                                                    language=language,
+                                                    speaker=model_id)
+                
+                self.silero_model.to(device)  # gpu or cpu
+
+                message_callback(f"loaded silero_tts (model_id={model_id}, speaker={speaker}) on {device}.")
+
+                def _get_wave(text, message_callback=lambda s: None):
+                    """Given a string, return a sound wave."""
+                    intshape = lambda tensor: tuple(int(i) for i in tensor.shape)
+                    with torch.no_grad():
+                        audio = self.silero_model.apply_tts(text=text, speaker=speaker, sample_rate=self.sample_rate)
+                    return audio
+                
+                self.get_wave = _get_wave
 
         else:
             self.sample_rate = 22050
@@ -227,13 +263,13 @@ import queue, threading
 
 class MessageTimer:
 
-    def __init__(self, label, message_queue, tag_padded_len=21):
+    def __init__(self, label: str, message_queue: queue.Queue, tag_padded_len: int=21, target_priority: int=0):
         self.label = label
         self.message_queue = message_queue
         self.tag_padded_len = tag_padded_len
         self.last_message_times = {}
         self.tic()
-        self.target_priority = 0
+        self.target_priority = target_priority
 
     def tic(self, tag=None):
         self.last_message_times[tag] = time.time()
@@ -274,14 +310,15 @@ def text_to_audio_worker(text_queue, audio_queue, message_queue, command_queue, 
                 break
         if not text_queue.empty():
             text = text_queue.get()
-            message_callback(f"Generating: {repr(text)}", notime=True, tag='text')
             message_callback.tic('tts')
+            message_callback.tic('samples')
             try:
                 wave = speaker_models.get_wave(text, message_callback=message_callback)
                 if isinstance(wave, torch.Tensor):
                     wave = wave.cpu().detach().numpy()
                 # Print the size padded to 16 characters.
-                message_callback(f"{wave.size:10} samples generated.", tag='tts', priority=-1)
+                message_callback(f"Generated: {repr(text)}", tag='tts')
+                message_callback(f"{wave.size:10} samples generated.", tag='samples', priority=-1)
                 audio_queue.put((text, wave))
             except Exception as e:
                 message_callback(f"Exception: {e}", tag='tts', priority=1)
@@ -289,7 +326,7 @@ def text_to_audio_worker(text_queue, audio_queue, message_queue, command_queue, 
             time.sleep(0.05)
 
 
-def audio_speaking_worker(audio_queue, message_queue, command_queue):
+def audio_speaking_worker(play_queue, message_queue, command_queue):
     # Every time we see something in the queue, take it off and speak it.
     message_callback = MessageTimer("SPEAKER", message_queue)
     samp_rate = 22050
@@ -302,13 +339,18 @@ def audio_speaking_worker(audio_queue, message_queue, command_queue):
                 if isinstance(command, dict):
                     if 'sample_rate' in command:
                         samp_rate = command['sample_rate']
-        if not audio_queue.empty():
-            text, wave = audio_queue.get()
+        if not play_queue.empty():
+            info = play_queue.get()
+            wave = info['audio']
+            text = info['text']
             n_samp = np.asarray(wave).size
             message_callback.tic('speaking')
             try:
                 message_callback(f"Speaking: {repr(text)}", notime=True, tag='text')
+                info['playing'] = True
                 play_wave(wave, sample_rate=samp_rate)
+                info['playing'] = False
+                info['queued'] = False
                 message_callback(f"{n_samp:10} samples spoken at sample rate {samp_rate}.", tag='speaking', priority=-1)
             except Exception as e:
                 message_callback(f"Exception: {e}", tag='speaking', priority=1)
@@ -320,8 +362,9 @@ class SpeakerApp(tk.Tk):
 
     def __init__(self, *args, speaker_silero=None, **kwargs):
         super().__init__(*args, **kwargs)    
-        self.text_queue = queue.Queue()
-        self.audio_queue = queue.Queue()
+        self.tts_queue = queue.Queue()
+        self.audio_return_queue = queue.Queue()
+        self.play_queue = queue.Queue()
         self.text_command_queue = queue.Queue()
         self.audio_command_queue = queue.Queue()
         self.worker_message_queue = queue.Queue()
@@ -329,12 +372,14 @@ class SpeakerApp(tk.Tk):
         self.sample_rate = 22050
 
         self.title("Speaker")
-        self.geometry("3000x1000")
+        self.geometry("1000x600")
         self.resizable(False, False)
+        # Make our UI elements generally left-aligned.
+        self.pack_propagate(0)
 
         # self.label = tk.Label(self, text=f"Enter text to speak with silero voice {speaker_silero}.")
-        self.label = tk.Label(self, text=f"Enter text to speak.")
-        self.label.pack()
+        self.label_input = tk.Label(self, text=f"Enter text to queue for TTS:")
+        self.label_input.pack()
 
         text_width = 360
         
@@ -342,26 +387,27 @@ class SpeakerApp(tk.Tk):
         self.input_textbox_frame = tk.Frame(self)
         self.input_textbox_frame.pack()
         self.input_textbox_label = tk.Label(self.input_textbox_frame, text="Text to speak:")
-        self.input_textbox = tk.Text(self.input_textbox_frame, height=20, width=text_width)
+        self.input_textbox = tk.Text(self.input_textbox_frame, height=5, width=text_width)
         textbox_scrollbar = tk.Scrollbar(self.input_textbox_frame, command=self.input_textbox.yview)
         self.input_textbox["yscrollcommand"] = textbox_scrollbar.set
         textbox_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
         self.input_textbox.pack()
 
-        self.add_to_queue_button = tk.Button(self, text="Add to Queue", command=self.add_to_queue)
+        self.add_to_queue_button = tk.Button(self, text="Add to Queue", command=self.add_to_tts_queue)
         self.add_to_queue_button.pack()
 
         self.queue_label = tk.Label(self, text="Queue length: 0")
         self.queue_label.pack()
 
-        self.audio_queue_label = tk.Label(self, text="Audio queue length: 0")
-        self.audio_queue_label.pack()
+        self.play_queue_label = tk.Label(self, text="Audio queue length: 0")
+        self.play_queue_label.pack()
 
         # Make the log textbox not wrap, but instead have a horizontal scrollbar.
-        self.message_textbox_frame = tk.Frame(self)
+        self.message_textbox_frame = tk.Frame(self, border=1, relief=tk.SUNKEN)
         self.message_textbox_frame.pack()
-        self.message_textbox_label = tk.Label(self.message_textbox_frame, text="Messages:")
-        self.message_textbox = tk.Text(self.message_textbox_frame, height=32, width=text_width, state=tk.DISABLED, wrap=tk.NONE)
+        self.message_textbox_label = tk.Label(self.message_textbox_frame, text="Log Messages")
+        self.message_textbox_label.pack(side=tk.TOP)
+        self.message_textbox = tk.Text(self.message_textbox_frame, height=10, width=text_width, state=tk.DISABLED, wrap=tk.NONE)
         message_textbox_scrollbar = tk.Scrollbar(self.message_textbox_frame, command=self.message_textbox.yview)
         self.message_textbox["yscrollcommand"] = message_textbox_scrollbar.set
         message_textbox_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
@@ -370,55 +416,151 @@ class SpeakerApp(tk.Tk):
         message_textbox_scrollbar_h.pack(side=tk.BOTTOM, fill=tk.X)
         self.message_textbox.pack()
 
+        # Make a horizontal scrollable box that we'll fill with buttons for each sentence.
+        self.sentence_outer_frame = tk.Frame(self, border=1, relief=tk.SUNKEN)
+        self.sentence_outer_frame.pack(fill=tk.X)
+        self.sentences_label = tk.Label(self.sentence_outer_frame, text="Click an item to play starting from there in the list:")
+        self.sentences_label.pack(side=tk.TOP)
+
+        # self.sentence_buttons_label = tk.Label(self.sentence_buttons_frame, text="Sentences:")
+        # self.sentence_buttons_label.pack(side=tk.LEFT)
+
+        self.sentence_canvas = tk.Canvas(self.sentence_outer_frame, height=100, width=1000, scrollregion=(0, 0, 10000, 100))
+        self.sentence_inner_frame = tk.Frame(self.sentence_canvas)
+
+        self.sentence_hbar = tk.Scrollbar(self.sentence_outer_frame, orient=tk.HORIZONTAL)
+        self.sentence_hbar.pack(side=tk.BOTTOM, fill=tk.X)
+        self.sentence_hbar.config(command=self.sentence_canvas.xview)
+
+        self.sentence_canvas.config(xscrollcommand=self.sentence_hbar.set)
+        self.sentence_canvas.pack(side=tk.LEFT, expand=True, fill=tk.X)
+
+        self.sentence_inner_frame.bind(
+            "<Configure>",
+            lambda e: self.sentence_canvas.configure(
+                scrollregion=self.sentence_canvas.bbox("all")
+            )
+        )
+        self.sentence_canvas.create_window((0, 0), window=self.sentence_inner_frame, anchor="nw")
+
+        # Add a few more buttons for some common tasks.
+        self.extra_buttons_Frame = tk.Frame(self, border=1, relief=tk.SUNKEN)
+        self.extra_buttons_Frame.pack()
+        self.clear_queue_button = tk.Button(self.extra_buttons_Frame, text="Clear Play Queue", command=self.clear_play_queue)
+        self.clear_queue_button.pack(side=tk.LEFT)
+        self.clear_TTS_queue_button = tk.Button(self.extra_buttons_Frame, text="Clear TTS Queue", command=self.clear_TTS_queue)
+        self.clear_TTS_queue_button.pack(side=tk.LEFT)
+        # ... I'll think of more later.
+
+        self.results = {}
+        
         # Start the worker threads.
-        self.text_to_audio_worker = threading.Thread(target=text_to_audio_worker, args=(self.text_queue, self.audio_queue, self.worker_message_queue, self.text_command_queue, speaker_silero))
+        self.text_to_audio_worker = threading.Thread(target=text_to_audio_worker, args=(self.tts_queue, self.audio_return_queue, self.worker_message_queue, self.text_command_queue, speaker_silero))
         self.text_to_audio_worker.start()
-        self.audio_speaking_worker = threading.Thread(target=audio_speaking_worker, args=(self.audio_queue, self.worker_message_queue, self.audio_command_queue))
+        self.audio_speaking_worker = threading.Thread(target=audio_speaking_worker, args=(self.play_queue, self.worker_message_queue, self.audio_command_queue))
         self.audio_speaking_worker.start()
 
         # Ensure the queue_label gets updated regularly.
-        self.label_update_delay = 250  # ms
-        self.after(self.label_update_delay, self.update_queue_label)
-        self.after(self.label_update_delay, self.update_audio_queue_label)
-        self.after(self.label_update_delay, self.update_message_label)
+        self.update_ui_delay = 250  # ms
+        self.after(self.update_ui_delay, self.update_ui)
 
-    def update_queue_label(self):
-        self.queue_label["text"] = f"TTS queue length: {self.text_queue.qsize()}"
-        self.after(self.label_update_delay, self.update_queue_label)
+    def add_sentence_button(self, text_id: int, text: str, audio: np.ndarray):
+        """Add a button to the sentence_buttons canvas."""
+        # The button will have width proportional to the audio size.
+        # The button will have height 100.
+        # The button text will be the sentence, but we'll let it run off the right side if it's too long.
+        # On creation, buttons will have no special color. But when their corresponding audio is playing, they'll turn green.
 
-    def update_audio_queue_label(self):
-        self.audio_queue_label["text"] = f"Speaker queue length: {self.audio_queue.qsize()}"
-        self.after(self.label_update_delay, self.update_audio_queue_label)
+        # Make the button with black text. 
+        # Let the text be left-aligned in the box, so it only runs off on the right.
+        button_width = max(20, int(audio.size * 5 / self.sample_rate))
+        button = tk.Button(self.sentence_inner_frame, text=text, width=button_width, fg='black', anchor=tk.W)
+        button.pack(side=tk.LEFT)
+        
+        # Add the button to the dictionary.
+        info = dict(
+            text=text,
+            text_id=text_id,
+            button=button,
+            audio=audio,
+            playing=False,
+            queued=False,
+        )
+        self.results[text_id] = info
+        # Add a callback to the button that will turn it green when its audio is playing.
+        button.config(command=lambda: self.start_from_button(text_id))
+
+    def clear_TTS_queue(self):
+        while not self.tts_queue.empty():
+            self.tts_queue.get()
+
+    def clear_play_queue(self):
+        while not self.play_queue.empty():
+            existing = self.play_queue.get()
+            existing['queued'] = False
+
+    def start_from_button(self, text_id: int):
+        """Start playing from here."""
+        # Clear the play queue.
+        self.clear_play_queue()
+        
+        # Add all audio from this text on to the play queue.
+        for future_i in range(text_id, len(self.results)):
+            item = self.results[future_i]
+            item['queued'] = True
+            self.play_queue.put(item)
+
+    def check_for_tts_results(self):
+        if not self.audio_return_queue.empty():
+            text, audio = self.audio_return_queue.get()
+            text_id = len(self.results)
+            self.add_sentence_button(text_id, text, audio)
+
+    def update_ui(self):
+        self.check_for_tts_results()
+
+        self.queue_label["text"] = f"TTS queue length: {self.tts_queue.qsize()}"
+
+        self.play_queue_label["text"] = f"Speaker queue length: {self.play_queue.qsize()}"
+
+        # Set the color of all play buttons.
+        for info in self.results.values():
+            if info['playing']:
+                info['button'].config(fg='green')
+            elif info['queued']:
+                info['button'].config(fg='blue')
+            else:
+                info['button'].config(fg='black')
+
+        if not self.worker_message_queue.empty():
+            message = self.worker_message_queue.get()
+            if not isinstance(message, str):
+                # The workers can pass data back to us also.
+                self.handle_nonstring_message(message)
+            else:
+                self.add_log_message(message)
+        self.after(self.update_ui_delay, self.update_ui)
+
+    def add_log_message(self, message):
+        """Append the message (after newline) to our message box existing text, and scroll to the bottom in the y direction."""
+        self.message_textbox.configure(state=tk.NORMAL)
+        self.message_textbox.insert(tk.END, message + "\n")
+        # Scroll to the bottom, but keep the x position the same.
+        x_pos = self.message_textbox.xview()[0]
+        self.message_textbox.see(tk.END)
+        self.message_textbox.xview_moveto(x_pos)
+        self.message_textbox.configure(state=tk.DISABLED)
 
     def handle_nonstring_message(self, message):
         if isinstance(message, dict):
             if 'sample_rate' in message:
                 self.audio_command_queue.put(message)
-
-    def update_message_label(self):
-        if not self.worker_message_queue.empty():
-            message = self.worker_message_queue.get()
-            if not isinstance(message, str):
-                # The workers can pass data back to use also.
-                self.handle_nonstring_message(message)
-
-            else:
-                # Append the message (after newline) to our message box existing text, and scroll to the bottom in the y direction.
-                self.message_textbox.configure(state=tk.NORMAL)
-                self.message_textbox.insert(tk.END, message + "\n")
-                # Scroll to the bottom, but keep the x position the same.
-                x_pos = self.message_textbox.xview()[0]
-                self.message_textbox.see(tk.END)
-                self.message_textbox.xview_moveto(x_pos)
-                self.message_textbox.configure(state=tk.DISABLED)
-            
-        self.after(self.label_update_delay, self.update_message_label)
         
-    def add_to_queue(self):
+    def add_to_tts_queue(self):
         text = self.input_textbox.get("1.0", "end-1c")
         for chunk in breakup(text):
-            self.text_queue.put(chunk)
-        self.queue_label["text"] = f"Queue length: {self.text_queue.qsize()}"
+            self.tts_queue.put(chunk.replace('\n', ' '))
+        self.queue_label["text"] = f"Queue length: {self.tts_queue.qsize()}"
 
         # Clear the input box.
         self.input_textbox.delete("1.0", tk.END)
