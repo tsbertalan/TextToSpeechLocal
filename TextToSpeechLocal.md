@@ -19,7 +19,11 @@ Some problems I could eventually fix:
 
 - [x] The actual voice is pretty rough. Get a better model. WaveRNN is much nicer, but too slow without smarter chunking. *After the author provided a workaround for a [bug I reported](https://github.com/snakers4/silero-models/discussions/245), I can now use all 117 of the Silero voices, which are good enough for me. Tacotron+WaveRNN would still be preferable if I could get it fast enough, though.*
 - [x] Sometimes the player thread runs out of of things to say because the model thread is too slow to generate them. Not sure what can be done about this. *Silero seems fast enough for this not to be a problem.*
-- [x] Get the memory usage down. It's something like 5.3GB! Maybe quantized models could help with this. *Well, actually, Process Explorer reports a much smaller number? Hard to tell.*
+- [x] Get the memory usage down. It's something like 5.3GB! Maybe quantized models could help with this.
+  - Well, actually, Process Explorer reports a much smaller number? Hard to tell.
+  - It now (with the Silero model) seems that it's more like 200MB of CPU memory (I'm still unsure about it's actual GPU memory, which was what the 5.3GB number was about) when doing nothing,
+    - plus maybe 10MB per sentence when they're sitting in the the TTS queue
+    - plus about 1MB per sentence when they're sitting in the speaker queue
 - [ ] Worse, sometimes the sentence is too long for the TacoTron, and it starts outputing gibberish. Do smaller chunks.
 - [ ] Make a playhead UI.
     - [ ] Add play/pause buttons.
