@@ -8,12 +8,14 @@ So, here's a crappy little app that does that. It's a local-only text-to-speech 
 
 Two worker threads handle the work: one to make the waves, and the other to speak them. The GUI breaks the given text up into chunks at sentence-like boundaries (using a few whitelisting regexes followed by a few blacklisting regexes to find those boundaries) and pushes them onto a first queue.
 
-The first worker thread preprocesses this text to tokens, ~tacotron2s it to a spectrogram, waveglows it to a big 1D array~ uses the turnkey Silero offline PyTorch TTS engine to make a wave from this, and pushes that to a second queue.
+The first worker thread preprocesses this text to tokens, ~tacotron2s it to a spectrogram, waveglows it to a big 1D array~ uses the turnkey Silero offline PyTorch TTS engine to make a wave from this, and pushes that to a queue for our UI to ingest.
 
-The second worker thread pops the 1D array off the queue, and plays it out loud (blocking that thread appropriately).
+The second worker thread pops dictionaries containing audio and metadata off a different queue, and plays the audio out loud (blocking that thread appropriately).
 
 There's a nice little GUI that lets you type in text and add it to the queue,
 with some information that's probably ultimately useless to the user; namely the length of the two queues, and messages returned from the two workers in a autoscrolling log box.
+
+Underneath the log window, there's a scrollable canvas of buttons to play the indicated results. If you click one, it and all following boxes change text color to blue to indicate they're queued for playing. Then the player worker starts popping them, and turning them green as it goes.
 
 Some problems I could eventually fix:
 
@@ -25,10 +27,11 @@ Some problems I could eventually fix:
     - plus maybe 10MB per sentence when they're sitting in the the TTS queue
     - plus about 1MB per sentence when they're sitting in the speaker queue
 - [ ] Worse, sometimes the sentence is too long for the TacoTron, and it starts outputing gibberish. Do smaller chunks.
-- [ ] Make a playhead UI.
-    - [ ] Add play/pause buttons.
+- [ ] Improve the playhead UI.
+    - [x] Don't just discard converted audio--let the user go back to previous chunks with the playhead.
+    - [ ] Add pause buttons, not just stop-all.
     - [ ] Indicate how much of the text is converted to audio with some kind of "buffering" playhead indicator.
-    - [ ] Don't just discard converted audio--let the user go back to previous chunks with the playhead.
+    - [ ] Maybe instead of buttons for TTS'd sentences, have a text canvas with clickable regions. Much easier to scan visually.
 - [ ] Use a prettier UI style.
 - [ ] Make the UI at least somewhat rescalable.
 - [ ] Add a checkbox to enable pausing autoscrolling of the log (or just drop the log if the UI is informative enough).
