@@ -3,7 +3,7 @@
 
 import tkinter as tk, re
 import torch, torchaudio, numpy as np
-import sounddevice as sd, time, os
+import sounddevice as sd, time, os, datetime
 
 
 def get_wave_duration(array, sample_rate):
@@ -369,7 +369,7 @@ class SpeakerApp(tk.Tk):
         self.audio_command_queue = queue.Queue()
         self.worker_message_queue = queue.Queue()
 
-        now = time.time()
+        now = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
         HERE = os.path.dirname(os.path.abspath(__file__))
         self.tts_history_file_path = os.path.join(HERE, f"TTS_{now}.md")
         self.tts_history_file = open(self.tts_history_file_path, 'w', encoding='utf8')
@@ -567,6 +567,7 @@ class SpeakerApp(tk.Tk):
         for chunk in breakup(text):
             self.tts_queue.put(chunk.replace('\n', ' '))
             self.tts_history_file.write(chunk + '\n')
+            self.tts_history_file.flush()
         self.queue_label["text"] = f"Queue length: {self.tts_queue.qsize()}"
 
         # Clear the input box.
