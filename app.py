@@ -371,7 +371,7 @@ class SpeakerApp(tk.Tk):
 
         now = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
         HERE = os.path.dirname(os.path.abspath(__file__))
-        self.tts_history_file_path = os.path.join(HERE, f"TTS_{now}.md")
+        self.tts_history_file_path = os.path.join(HERE, 'logs', f"TTS_{now}.md")
         self.tts_history_file = open(self.tts_history_file_path, 'w', encoding='utf8')
 
         self.sample_rate = 22050
