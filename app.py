@@ -3,7 +3,7 @@
 
 import tkinter as tk, re
 import torch, torchaudio, numpy as np
-import sounddevice as sd, time
+import sounddevice as sd, time, os
 
 
 def get_wave_duration(array, sample_rate):
@@ -369,6 +369,11 @@ class SpeakerApp(tk.Tk):
         self.audio_command_queue = queue.Queue()
         self.worker_message_queue = queue.Queue()
 
+        now = time.time()
+        HERE = os.path.dirname(os.path.abspath(__file__))
+        self.tts_history_file_path = os.path.join(HERE, f"TTS_{now}.md")
+        self.tts_history_file = open(self.tts_history_file_path, 'w', encoding='utf8')
+
         self.sample_rate = 22050
 
         self.title("Speaker")
@@ -561,6 +566,7 @@ class SpeakerApp(tk.Tk):
         text = self.input_textbox.get("1.0", "end-1c")
         for chunk in breakup(text):
             self.tts_queue.put(chunk.replace('\n', ' '))
+            self.tts_history_file.write(chunk + '\n')
         self.queue_label["text"] = f"Queue length: {self.tts_queue.qsize()}"
 
         # Clear the input box.
@@ -586,6 +592,8 @@ class SpeakerApp(tk.Tk):
             print("Threads still alive. Killing everything.")
             import os
             os._exit(0)
+
+        self.tts_history_file.close()
         
 
 if __name__ == "__main__":
