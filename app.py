@@ -2,8 +2,34 @@
 # Let's adapt the above tut1 to make a little tk app that says things you put in a text box, after you click a "speak" button.
 
 import tkinter as tk, re
+from tkinter import ttk
 import torch, torchaudio, numpy as np
 import sounddevice as sd, time, os, datetime
+
+
+# Add to env from .env file in current directory.
+HERE = os.path.dirname(os.path.abspath(__file__))
+if os.path.exists(os.path.join(HERE, '.env')):
+    from dotenv import load_dotenv
+    load_dotenv(os.path.join(HERE, '.env'))
+
+import tempfile
+TEMPDIR = tempfile.gettempdir()
+
+import joblib
+joblib_cache = joblib.Memory(os.path.join(TEMPDIR, 'joblib'), verbose=0)
+
+@joblib_cache.cache(ignore=['oai_client'])  # Save some bux
+def openai_tts(text, oai_client, model='tts-1', voice='alloy'):
+    _speech_tempfile_path = os.path.join(TEMPDIR, "tts.wav")
+    response = oai_client.audio.speech.create(
+        model=model,
+        voice=voice,
+        input=text
+    )
+    response.stream_to_file(_speech_tempfile_path)
+    wave, rate = torchaudio.load(_speech_tempfile_path)
+    return wave[0], rate
 
 
 def get_wave_duration(array, sample_rate):
@@ -28,7 +54,7 @@ def play_wave(array, sample_rate=22050, extra_delay=0, do_sleep=False):
 
 class SpeakerModels:
 
-    def __init__(self, message_callback=lambda s: None, speaker_silero=None):
+    def __init__(self, message_callback=lambda s: None, use_whisper=True, speaker_silero=None):
         """Contains the tokenizer, spectrogrammer (tacotron2), and vocoder (waveglow)."""
         torch.random.manual_seed(0)
         use_tacotron = False
@@ -40,11 +66,25 @@ class SpeakerModels:
         self.device = device
 
 
-        if not use_tacotron:
+        if use_whisper:
+            from openai import OpenAI
+            self.oai_client = OpenAI()
+            self.oai_model = "tts-1"
+            self.oai_voice = "alloy"
+            
+            self._speech_tempfile_path = os.path.join(TEMPDIR, "tts.wav")
+
+            def _get_wave(text, message_callback=lambda s: None):
+                """Given a string, return a sound wave."""
+                message_callback(f"OAI-TTS ({self.oai_model}:{self.oai_voice}): {repr(text)}")
+                wave, rate = openai_tts(text, self.oai_client, model=self.oai_model, voice=self.oai_voice)
+                self.sample_rate = rate
+                return wave
+            self.get_wave = _get_wave
+
+        elif not use_tacotron:
             use_audiocraft = False  # This doesn't work. Not TTS; for sound effects instead, it seems.
             if use_audiocraft:
-
-                import torchaudio
                 from audiocraft.models import AudioGen
                 # from audiocraft.data.audio import audio_write
 
@@ -298,8 +338,13 @@ def text_to_audio_worker(text_queue, audio_queue, message_queue, command_queue, 
     # Make the speaker models.
     message_callback = MessageTimer("TTS MODEL", message_queue)
     message_callback("Loading models...", tag='loading', notime=True)
+
     speaker_models = SpeakerModels(message_callback=message_callback, speaker_silero=speaker_silero)
-    message_queue.put(dict(sample_rate=speaker_models.sample_rate))
+
+    try:
+        message_queue.put(dict(sample_rate=speaker_models.sample_rate))
+    except AttributeError:
+        pass
     message_callback("Models loaded.", tag='loading')
 
     # Every time we see something in the queue, take it off and TTS it.
@@ -319,7 +364,7 @@ def text_to_audio_worker(text_queue, audio_queue, message_queue, command_queue, 
                 # Print the size padded to 16 characters.
                 message_callback(f"Generated: {repr(text)}", tag='tts')
                 message_callback(f"{wave.size:10} samples generated.", tag='samples', priority=-1)
-                audio_queue.put((text, wave))
+                audio_queue.put((text, wave, speaker_models.sample_rate))
             except Exception as e:
                 message_callback(f"Exception: {e}", tag='tts', priority=1)
         else:
@@ -343,6 +388,8 @@ def audio_speaking_worker(play_queue, message_queue, command_queue):
             info = play_queue.get()
             wave = info['audio']
             text = info['text']
+            if 'sample_rate' in info:
+                samp_rate = info['sample_rate']
             n_samp = np.asarray(wave).size
             message_callback.tic('speaking')
             try:
@@ -362,6 +409,16 @@ class SpeakerApp(tk.Tk):
 
     def __init__(self, *args, speaker_silero=None, **kwargs):
         super().__init__(*args, **kwargs)    
+
+        self.style = ttk.Style()
+        from tkinter.constants import NORMAL, ACTIVE
+        self.style_b0 = ttk.Style()
+        self.style_b0.configure('button_0.TButton', foreground='black')
+        self.style_b1 = ttk.Style()
+        self.style_b1.configure('button_1.TButton', foreground='green')
+        self.style_b2 = ttk.Style()
+        self.style_b2.configure('button_2.TButton', foreground='blue')
+
         self.tts_queue = queue.Queue()
         self.audio_return_queue = queue.Queue()
         self.play_queue = queue.Queue()
@@ -382,58 +439,58 @@ class SpeakerApp(tk.Tk):
         # Make our UI elements generally left-aligned.
         self.pack_propagate(0)
 
-        # self.label = tk.Label(self, text=f"Enter text to speak with silero voice {speaker_silero}.")
-        self.label_input = tk.Label(self, text=f"Enter text to queue for TTS:")
+        # self.label = ttk.Label(self, text=f"Enter text to speak with silero voice {speaker_silero}.")
+        self.label_input = ttk.Label(self, text=f"Enter text to queue for TTS:")
         self.label_input.pack()
 
         text_width = 360
         
         # Scrollable textbox for the input:
-        self.input_textbox_frame = tk.Frame(self)
+        self.input_textbox_frame = ttk.Frame(self)
         self.input_textbox_frame.pack()
-        self.input_textbox_label = tk.Label(self.input_textbox_frame, text="Text to speak:")
+        self.input_textbox_label = ttk.Label(self.input_textbox_frame, text="Text to speak:")
         self.input_textbox = tk.Text(self.input_textbox_frame, height=5, width=text_width)
-        textbox_scrollbar = tk.Scrollbar(self.input_textbox_frame, command=self.input_textbox.yview)
+        textbox_scrollbar = ttk.Scrollbar(self.input_textbox_frame, command=self.input_textbox.yview)
         self.input_textbox["yscrollcommand"] = textbox_scrollbar.set
         textbox_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
         self.input_textbox.pack()
 
-        self.add_to_queue_button = tk.Button(self, text="Add to Queue", command=self.add_to_tts_queue)
+        self.add_to_queue_button = ttk.Button(self, text="Add to Queue", command=self.add_to_tts_queue)
         self.add_to_queue_button.pack()
 
-        self.queue_label = tk.Label(self, text="Queue length: 0")
+        self.queue_label = ttk.Label(self, text="Queue length: 0")
         self.queue_label.pack()
 
-        self.play_queue_label = tk.Label(self, text="Audio queue length: 0")
+        self.play_queue_label = ttk.Label(self, text="Audio queue length: 0")
         self.play_queue_label.pack()
 
         # Make the log textbox not wrap, but instead have a horizontal scrollbar.
-        self.message_textbox_frame = tk.Frame(self, border=1, relief=tk.SUNKEN)
+        self.message_textbox_frame = ttk.Frame(self, border=1, relief=tk.SUNKEN)
         self.message_textbox_frame.pack()
-        self.message_textbox_label = tk.Label(self.message_textbox_frame, text="Log Messages")
+        self.message_textbox_label = ttk.Label(self.message_textbox_frame, text="Log Messages")
         self.message_textbox_label.pack(side=tk.TOP)
         self.message_textbox = tk.Text(self.message_textbox_frame, height=10, width=text_width, state=tk.DISABLED, wrap=tk.NONE)
-        message_textbox_scrollbar = tk.Scrollbar(self.message_textbox_frame, command=self.message_textbox.yview)
+        message_textbox_scrollbar = ttk.Scrollbar(self.message_textbox_frame, command=self.message_textbox.yview)
         self.message_textbox["yscrollcommand"] = message_textbox_scrollbar.set
         message_textbox_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-        message_textbox_scrollbar_h = tk.Scrollbar(self.message_textbox_frame, command=self.message_textbox.xview, orient=tk.HORIZONTAL)
+        message_textbox_scrollbar_h = ttk.Scrollbar(self.message_textbox_frame, command=self.message_textbox.xview, orient=tk.HORIZONTAL)
         self.message_textbox["xscrollcommand"] = message_textbox_scrollbar_h.set
         message_textbox_scrollbar_h.pack(side=tk.BOTTOM, fill=tk.X)
         self.message_textbox.pack()
 
         # Make a horizontal scrollable box that we'll fill with buttons for each sentence.
-        self.sentence_outer_frame = tk.Frame(self, border=1, relief=tk.SUNKEN)
+        self.sentence_outer_frame = ttk.Frame(self, border=1, relief=tk.SUNKEN)
         self.sentence_outer_frame.pack(fill=tk.X)
-        self.sentences_label = tk.Label(self.sentence_outer_frame, text="Click an item to play starting from there in the list:")
+        self.sentences_label = ttk.Label(self.sentence_outer_frame, text="Click an item to play starting from there in the list:")
         self.sentences_label.pack(side=tk.TOP)
 
-        # self.sentence_buttons_label = tk.Label(self.sentence_buttons_frame, text="Sentences:")
+        # self.sentence_buttons_label = ttk.Label(self.sentence_buttons_frame, text="Sentences:")
         # self.sentence_buttons_label.pack(side=tk.LEFT)
 
         self.sentence_canvas = tk.Canvas(self.sentence_outer_frame, height=100, width=1000, scrollregion=(0, 0, 10000, 100))
-        self.sentence_inner_frame = tk.Frame(self.sentence_canvas)
+        self.sentence_inner_frame = ttk.Frame(self.sentence_canvas)
 
-        self.sentence_hbar = tk.Scrollbar(self.sentence_outer_frame, orient=tk.HORIZONTAL)
+        self.sentence_hbar = ttk.Scrollbar(self.sentence_outer_frame, orient=tk.HORIZONTAL)
         self.sentence_hbar.pack(side=tk.BOTTOM, fill=tk.X)
         self.sentence_hbar.config(command=self.sentence_canvas.xview)
 
@@ -449,11 +506,11 @@ class SpeakerApp(tk.Tk):
         self.sentence_canvas.create_window((0, 0), window=self.sentence_inner_frame, anchor="nw")
 
         # Add a few more buttons for some common tasks.
-        self.extra_buttons_Frame = tk.Frame(self, border=1, relief=tk.SUNKEN)
+        self.extra_buttons_Frame = ttk.Frame(self, border=1, relief=tk.SUNKEN)
         self.extra_buttons_Frame.pack()
-        self.clear_queue_button = tk.Button(self.extra_buttons_Frame, text="Clear Play Queue", command=self.clear_play_queue)
+        self.clear_queue_button = ttk.Button(self.extra_buttons_Frame, text="Clear Play Queue", command=self.clear_play_queue)
         self.clear_queue_button.pack(side=tk.LEFT)
-        self.clear_TTS_queue_button = tk.Button(self.extra_buttons_Frame, text="Clear TTS Queue", command=self.clear_TTS_queue)
+        self.clear_TTS_queue_button = ttk.Button(self.extra_buttons_Frame, text="Clear TTS Queue", command=self.clear_TTS_queue)
         self.clear_TTS_queue_button.pack(side=tk.LEFT)
         # ... I'll think of more later.
 
@@ -479,7 +536,7 @@ class SpeakerApp(tk.Tk):
         # Make the button with black text. 
         # Let the text be left-aligned in the box, so it only runs off on the right.
         button_width = max(20, int(audio.size * 5 / self.sample_rate))
-        button = tk.Button(self.sentence_inner_frame, text=text, width=button_width, fg='black', anchor=tk.W)
+        button = ttk.Button(self.sentence_inner_frame, text=text, width=button_width, style='button_0.TButton')
         button.pack(side=tk.LEFT)
         
         # Add the button to the dictionary.
@@ -490,6 +547,7 @@ class SpeakerApp(tk.Tk):
             audio=audio,
             playing=False,
             queued=True,
+            sample_rate=self.sample_rate,
         )
         self.results[text_id] = info
         self.play_queue.put(info)
@@ -518,7 +576,8 @@ class SpeakerApp(tk.Tk):
 
     def check_for_tts_results(self):
         if not self.audio_return_queue.empty():
-            text, audio = self.audio_return_queue.get()
+            text, audio, rate = self.audio_return_queue.get()
+            self.sample_rate = rate
             text_id = len(self.results)
             self.add_sentence_button(text_id, text, audio)
 
@@ -532,11 +591,11 @@ class SpeakerApp(tk.Tk):
         # Set the color of all play buttons.
         for info in self.results.values():
             if info['playing']:
-                info['button'].config(fg='green')
+                info['button'].config(style="button_1.TButton")
             elif info['queued']:
-                info['button'].config(fg='blue')
+                info['button'].config(style="button_2.TButton")
             else:
-                info['button'].config(fg='black')
+                info['button'].config(style="button_0.TButton")
 
         if not self.worker_message_queue.empty():
             message = self.worker_message_queue.get()

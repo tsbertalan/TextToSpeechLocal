@@ -14,3 +14,7 @@ sentencepiece
 omegaconf
 pydub
 PyYAML
+
+torchaudio
+openai
+python-dotenv
