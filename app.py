@@ -27,7 +27,11 @@ def openai_tts(text, oai_client, model='tts-1', voice='alloy'):
         voice=voice,
         input=text
     )
-    response.stream_to_file(_speech_tempfile_path)
+    # Suppress the DeprecationWarning from stream_to_file. https://community.openai.com/t/tts-does-not-work-curl-python/609455/2
+    import warnings
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore") 
+        response.stream_to_file(_speech_tempfile_path)
     wave, rate = torchaudio.load(_speech_tempfile_path)
     return wave[0], rate
 
