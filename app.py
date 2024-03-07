@@ -74,7 +74,7 @@ class SpeakerModels:
             from openai import OpenAI
             self.oai_client = OpenAI()
             self.oai_model = "tts-1"
-            self.oai_voice = "alloy"
+            self.oai_voice = "shimmer"
             
             self._speech_tempfile_path = os.path.join(TEMPDIR, "tts.wav")
 
